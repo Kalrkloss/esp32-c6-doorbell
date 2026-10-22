@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Capture the doorbell's serial output across deep-sleep cycles.
 
-The USB-Serial-JTAG device disappears while the chip sleeps, so a plain
-`cat`/monitor loses output. This helper reopens the port as soon as it
-reappears and appends everything to a file.
+Two traps this script avoids:
+
+1. The USB-Serial-JTAG device disappears while the chip sleeps, so a plain
+   `cat`/`idf.py monitor` loses output or exits. The port is reopened as soon
+   as it reappears.
+2. Do NOT use pyserial here. pyserial asserts DTR and RTS when it opens a port,
+   and on the ESP32-C6 USB-Serial-JTAG bridge that is exactly the reset sequence
+   (the same lines esptool toggles): the chip reboots with wake cause UNDEFINED,
+   RTC memory is gone, and a real button press looks like a power-on reset. A
+   raw file descriptor leaves the modem lines alone.
 
 Usage: python3 scripts/serial_capture.py --port /dev/ttyACM2 --seconds 30 --out /tmp/boot.log
 """
 
 import argparse
+import os
 import time
-
-import serial
 
 
 def main() -> int:
@@ -23,29 +29,36 @@ def main() -> int:
 
     out = open(args.out, "wb")
     end = time.time() + args.seconds
-    ser = None
+    fd = None
     while time.time() < end:
-        if ser is None:
+        if fd is None:
             try:
-                ser = serial.Serial(args.port, 115200, timeout=0.2)
-                # pyserial asserts DTR/RTS on open; on the ESP32-C6 USB-Serial-
-                # JTAG bridge that can hold the chip in reset, so release both.
-                ser.dtr = False
-                ser.rts = False
-            except Exception:
+                # O_NOCTTY: no controlling terminal, O_NONBLOCK: open even while
+                # the device is still initialising. No termios/DTR/RTS changes.
+                fd = os.open(args.port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+            except OSError:
                 time.sleep(0.02)
                 continue
         try:
-            data = ser.read(8192)
+            data = os.read(fd, 8192)
             if data:
                 out.write(data)
                 out.flush()
-        except Exception:
+            else:
+                time.sleep(0.02)
+        except BlockingIOError:
+            time.sleep(0.02)
+        except OSError:
             try:
-                ser.close()
-            except Exception:
+                os.close(fd)
+            except OSError:
                 pass
-            ser = None
+            fd = None
+    if fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
     out.close()
     return 0
 

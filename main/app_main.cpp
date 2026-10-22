@@ -26,6 +26,9 @@
 
 #include "doorbell_button.hpp"
 #include "doorbell_config.hpp"
+#if CONFIG_DOORBELL_GPIO_PROBE
+#include "gpio_probe.hpp"
+#endif
 #include "doorbell_device.hpp"
 
 namespace {
@@ -159,6 +162,10 @@ extern "C" void app_main(void)
              s_boot_count, esp_sleep_get_wakeup_causes(),
              button_wake ? "button" : (power_on ? "power-on/reset" : "timer"), s_pending_presses,
              doorbell::button_is_pressed() ? "closed" : "open");
+
+#if CONFIG_DOORBELL_GPIO_PROBE
+    doorbell::gpio_probe_start();
+#endif
 
     ESP_ERROR_CHECK(doorbell::zigbee_start());
 

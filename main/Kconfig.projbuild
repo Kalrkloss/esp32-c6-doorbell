@@ -46,6 +46,14 @@ menu "Doorbell firmware"
             so 0 (only wake on button press) is the lowest power setting; the
             first press after a long idle then needs an extra rejoin.
 
+    config DOORBELL_GPIO_PROBE
+        bool "Log the level of GPIO0..GPIO10 while awake (pin identification)"
+        default n
+        help
+            Prints the level of the LP-capable GPIOs every 500 ms so the pin a
+            button is actually wired to can be found. Use together with a long
+            DOORBELL_BOOT_AWAKE_S.
+
     config DOORBELL_BOOT_AWAKE_S
         int "Stay awake after power-on (s)"
         default 10

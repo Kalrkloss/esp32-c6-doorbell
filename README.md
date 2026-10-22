@@ -9,6 +9,7 @@ back to sleep.
 
 | Item | Value |
 | --- | --- |
+| Button | GPIO2 (LP/RTC capable, active low, internal RTC pull-up), Kconfig `DOORBELL_BUTTON_GPIO` |
 | Endpoint | 1 (HA profile `0x0104`, device id `0x0006` *Remote Control*) |
 | Server clusters | Basic, Identify, Multistate Input (`0x0012`) |
 | Signal | `MultistateInput.PresentValue`: `1` = contact closed (press), `0` = released |
@@ -29,6 +30,13 @@ shows it as a device trigger. That is the doorbell semantic.
   light sleep (35–180 µA).
 * Wake sources: the contact (EXT1, active low) and optionally a maintenance
   timer (`Doorbell firmware → Periodic keepalive wake-up`, default off).
+* Only GPIO0..GPIO7 can wake the ESP32-C6 from deep sleep
+  (`SOC_GPIO_DEEP_SLEEP_WAKE_VALID_GPIO_MASK`); the on-board BOOT button (GPIO9) cannot, and
+  pressing it while the chip resets would enter the ROM download mode. The doorbell contact
+  therefore has to sit on an LP pin.
+* No external pull-up needed for a short lead: `rtc_gpio_pullup_en()` is held through the RTC
+  domain / pad hold. For a long doorbell cable add 10 kOhm to 3V3 and 100 nF to GND at the
+  board - EXT1 triggers on level low, so noise would otherwise wake the chip.
 * Because deep sleep loses the parent link, a press after a very long idle
   performs a rejoin first (one extra round trip, no user-visible difference).
 
@@ -46,6 +54,25 @@ shows it as a device trigger. That is the doorbell semantic.
    retried on the next wake-up (max 5 queued presses).
 6. If the contact is still closed at sleep time, the chip sleeps on the timer
    only (otherwise the level-triggered wake-up would boot-loop).
+
+## Verified behaviour (2026-10-22, ESP32-C6FH4)
+
+One physical press on GPIO2, captured with a raw serial reader:
+
+```
+APP: boot #2 (wake cause 0x8: button), 1 press(es) queued, contact open
+ZB:  network state restored from NVS, re-attached (PAN 0x4ec1, channel 11, short 0xe1eb)
+APP: delivering 1 queued press(es)
+ZB:  reported button state 1
+ZB:  reported button state 0
+APP: deep sleep until button press
+```
+-> `zigbee2mqtt/klingel/action` = `single` (~1.4 s from press to sleep).
+
+Note for anyone debugging with a serial console: a pyserial-based reader asserts
+DTR+RTS on open, which is the C6 USB-JTAG reset sequence - the chip reboots and the press
+looks like a power-on reset. `scripts/serial_capture.py` uses a raw file descriptor for
+that reason.
 
 ## Build & flash
 
