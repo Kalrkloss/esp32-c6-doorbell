@@ -1,61 +1,78 @@
-# ESP32-C6 Zigbee doorbell button
+# esp32-c6-doorbell
 
-Battery-friendly Zigbee push button (a doorbell) on an ESP32-C6, built with
-ESP-IDF + ESP-Zigbee-SDK in C++. The device sits in **deep sleep (~7 µA)**, wakes
-on the doorbell contact at GPIO0, reports the press to the coordinator and goes
-back to sleep.
+A battery-powered Zigbee **doorbell button** on an ESP32-C6: it sleeps in deep
+sleep at ~7 µA, wakes when the bell contact closes, reports the press to
+Zigbee2MQTT / Home Assistant as `action: single`, and goes back to sleep.
 
-## What the device looks like on the Zigbee side
+![ESP32-C6 Super Mini with a doorbell button on GPIO2](docs/board-and-button.svg)
+
+*Illustration, not a photo — the ESP32-C6 Super Mini board and the doorbell
+contact on GPIO2.*
+
+## What it does
+
+* **Deep sleep, not light sleep.** The chip is powered down to the datasheet's
+  ~7 µA; every press is a cold boot that re-attaches to the Zigbee network and
+  reports. Total awake time per press is about 1.4 s.
+* **A button, not a switch.** No toggle commands, no switch entity. The device
+  reports `MultistateInput.PresentValue` (`1` = contact closed, `0` = released) —
+  the cluster ZCL defines for push buttons — and Zigbee2MQTT turns that into
+  `action`, which Home Assistant exposes as a device trigger.
+* **Nothing to configure on the radio side.** Network state lives in NVS, so the
+  device rejoins by itself after each wake-up. No battery reporting, no OTA,
+  no polling while asleep.
+* **Bench-friendly:** a Kconfig self-test simulates presses, a GPIO probe finds
+  the button pin, and the scripts in `scripts/` flash and capture a board that
+  disappears from USB while it sleeps.
+
+## Hardware
+
+| Part | Note |
+| --- | --- |
+| ESP32-C6 Super Mini (ESP32-C6FH4, 4 MB flash) | any C6 board with an exposed LP pin works |
+| Push button | between **GPIO2** and **GND**, internal RTC pull-up used |
+| Power | USB for development; a battery/LiSoC for the real doorbell |
+
+Only **GPIO0 … GPIO7** can wake the ESP32-C6 from deep sleep
+(`SOC_GPIO_DEEP_SLEEP_WAKE_VALID_GPIO_MASK` in `soc_caps.h`). The on-board BOOT
+button sits on GPIO9 — a strapping pin that even rejects EXT1 wake-up — so the
+bell contact needs its own LP-capable pin. The pin is selectable in Kconfig
+(`Doorbell firmware → GPIO of the doorbell push button`).
+
+For a real doorbell lead, add an external **10 kΩ to 3V3 and 100 nF to GND** at
+the board. EXT1 triggers on *level* low, so an unshielded cable otherwise turns
+every glitch into a doorbell ring.
+
+## Zigbee model
 
 | Item | Value |
 | --- | --- |
-| Button | GPIO2 (LP/RTC capable, active low, internal RTC pull-up), Kconfig `DOORBELL_BUTTON_GPIO` |
-| Endpoint | 1 (HA profile `0x0104`, device id `0x0006` *Remote Control*) |
+| Endpoint | 1, HA profile `0x0104`, device id `0x0006` *Remote Control* |
 | Server clusters | Basic, Identify, Multistate Input (`0x0012`) |
-| Signal | `MultistateInput.PresentValue`: `1` = contact closed (press), `0` = released |
+| Signal | `MultistateInput.PresentValue`: `1` = pressed, `0` = released |
 | Model / manufacturer | `C6-DOORBELL` / `DIY` |
+| Zigbee2MQTT | external converter `z2m/esp32c6_doorbell.js` → `action: single` |
 
-The button is deliberately **not** an on/off switch: no toggle commands, no
-switch entity. A press is a multistate value change, the cluster ZCL defines for
-push buttons; Zigbee2MQTT turns it into an `action` (`single`), Home Assistant
-shows it as a device trigger. That is the doorbell semantic.
+## Sleep model
 
-## Sleep model (deep sleep, not light sleep)
+* Deep sleep powers down CPU, radio and the digital domain; the RTC domain keeps
+  a few words (`RTC_DATA_ATTR`) for the boot counter and undelivered presses.
+* Wake-up sources: the contact (EXT1, active low) and optionally a maintenance
+  timer (`Periodic keepalive wake-up`, default **off** — every timer wake costs a
+  full boot and roughly triples the average draw).
+* The press is reported *after* the stack re-attached to its parent, never
+  before. If the network cannot be reached, the press stays queued in RTC memory
+  and is delivered on the next wake-up (up to 5 presses).
+* If the contact is still closed at sleep time, the chip sleeps on the timer
+  only — an armed level-triggered wake-up with a held button would boot-loop.
+* Deep sleep powers the USB PHY down, so the board **disappears from
+  `/dev/ttyACM*` while asleep**. After a power-on reset the firmware therefore
+  stays awake for 10 s (`Stay awake after power-on`), which is the window used
+  for flashing and the serial console.
+* Because deep sleep loses the parent link, the first press after a very long
+  idle performs a rejoin first (one extra round trip, not user visible).
 
-* Deep sleep: CPU/radio/digital domain off, RTC domain keeps a few words
-  (`RTC_DATA_ATTR`), typical current 7 µA (ESP32-C6 datasheet, table 5-11).
-* Every wake-up is a **cold boot**: NVS → Zigbee stack restores its network
-  state → re-attach to the parent → report → sleep. Measured boot-to-report path
-  is ~0.6–1.5 s, which is the price for the ~25× lower idle current compared to
-  light sleep (35–180 µA).
-* Wake sources: the contact (EXT1, active low) and optionally a maintenance
-  timer (`Doorbell firmware → Periodic keepalive wake-up`, default off).
-* Only GPIO0..GPIO7 can wake the ESP32-C6 from deep sleep
-  (`SOC_GPIO_DEEP_SLEEP_WAKE_VALID_GPIO_MASK`); the on-board BOOT button (GPIO9) cannot, and
-  pressing it while the chip resets would enter the ROM download mode. The doorbell contact
-  therefore has to sit on an LP pin.
-* No external pull-up needed for a short lead: `rtc_gpio_pullup_en()` is held through the RTC
-  domain / pad hold. For a long doorbell cable add 10 kOhm to 3V3 and 100 nF to GND at the
-  board - EXT1 triggers on level low, so noise would otherwise wake the chip.
-* Because deep sleep loses the parent link, a press after a very long idle
-  performs a rejoin first (one extra round trip, no user-visible difference).
-
-## Behaviour
-
-1. Boot, NVS init, GPIO0 configured as input with pull-up (also in the RTC
-   domain, so the line is defined while the digital domain is down).
-2. Zigbee stack starts; if NVS holds a network it re-attaches, otherwise it
-   searches for a network (permit-join must be open).
-3. First join only: stay awake `CONFIG_DOORBELL_JOIN_AWAKE_S` (default 120 s),
-   polling every second, so the coordinator can interview the device.
-4. Press → `PresentValue = 1` → wait for release → `PresentValue = 0` →
-   deep sleep. The trailing `0` guarantees the next press is a value *change*.
-5. A press that cannot be delivered (no network) is kept in RTC memory and
-   retried on the next wake-up (max 5 queued presses).
-6. If the contact is still closed at sleep time, the chip sleeps on the timer
-   only (otherwise the level-triggered wake-up would boot-loop).
-
-## Verified behaviour (2026-10-22, ESP32-C6FH4)
+## Verified behaviour
 
 One physical press on GPIO2, captured with a raw serial reader:
 
@@ -67,73 +84,124 @@ ZB:  reported button state 1
 ZB:  reported button state 0
 APP: deep sleep until button press
 ```
--> `zigbee2mqtt/klingel/action` = `single` (~1.4 s from press to sleep).
 
-Note for anyone debugging with a serial console: a pyserial-based reader asserts
-DTR+RTS on open, which is the C6 USB-JTAG reset sequence - the chip reboots and the press
-looks like a power-on reset. `scripts/serial_capture.py` uses a raw file descriptor for
-that reason.
+→ `zigbee2mqtt/klingel/action` = `single`, ~1.4 s from press to sleep. Three
+consecutive presses produced exactly three actions, no duplicates.
 
-## Build & flash
+## Build and flash
 
 ```bash
-. /opt/esp-idf/export.sh               # ESP-IDF v5.5.x
-cd /opt/projects/esp32c6-zigbee-doorbell
+. /opt/esp-idf/export.sh          # ESP-IDF v5.5.x
 idf.py set-target esp32c6
 idf.py build
-idf.py -p /dev/ttyACM2 flash monitor
 ```
 
 `main/idf_component.yml` pulls `espressif/esp-zigbee-lib` (^2.0.5) from the
 component registry on the first build.
 
-Kconfig options (menu `Doorbell firmware`): button GPIO (default 0), ED timeout,
-poll interval while awake, join-aware window, optional keepalive wake-up,
-self-test mode (`DOORBELL_SELFTEST`, one simulated press per boot, then restart
-instead of sleeping — for bench tests without touching the hardware).
-
-## Zigbee2MQTT
-
-`z2m/esp32c6_doorbell.js` is the external converter. Install it either by
-copying it to `/opt/zigbee2mqtt/data/external_converters/` or, without a
-restart, through the bridge API:
+Flashing a sleeping device needs a trick, because its USB port only exists for a
+moment after power-on:
 
 ```bash
-python3 - <<'PY'
-import json, pathlib, subprocess
-code = pathlib.Path('z2m/esp32c6_doorbell.js').read_text()
-subprocess.run(['mosquitto_pub', '-t', 'zigbee2mqtt/bridge/request/converter/save',
-                '-m', json.dumps({'name': 'esp32c6_doorbell.js', 'code': code})], check=True)
-PY
+# power-cycles the hub port and catches the awake window with esptool in-process
+python3 scripts/flash_when_awake.py --port /dev/ttyACM2 --hub 1-5 --hub-port 4
+
+# serial output across deep-sleep cycles (raw fd: pyserial would reset the chip)
+python3 scripts/serial_capture.py --port /dev/ttyACM2 --seconds 120 --out /tmp/boot.log
 ```
 
-Pairing: open permit-join (`zigbee2mqtt/bridge/request/permit_join`
-`{"value": true, "time": 254}`), then power-cycle the board — a factory-new
-device steers into the network and stays awake for the interview.
+Both scripts assume a hub port that `uhubctl` can switch; with a plain USB cable
+just replug and run `idf.py -p <port> flash` during the 10 s window.
 
-Every press publishes `zigbee2mqtt/<friendly_name>/action` = `single` and a
-device trigger, e.g. for a Home Assistant automation:
+## Pairing (Zigbee2MQTT)
 
-```yaml
-trigger:
-  - platform: device
-    domain: mqtt
-    device_id: <doorbell device>
-    type: action
-    subtype: single
+1. Install the external converter — either copy `z2m/esp32c6_doorbell.js` to
+   `<z2m>/data/external_converters/` or load it live, without a restart:
+
+   ```bash
+   python3 - <<'PY'
+   import json, pathlib, subprocess
+   code = pathlib.Path('z2m/esp32c6_doorbell.js').read_text()
+   subprocess.run(['mosquitto_pub', '-t', 'zigbee2mqtt/bridge/request/converter/save',
+                   '-m', json.dumps({'name': 'esp32c6_doorbell.js', 'code': code})], check=True)
+   PY
+   ```
+
+2. Open permit-join, then power-cycle the board (a factory-new device steers in
+   and stays awake for the interview):
+
+   ```bash
+   mosquitto_pub -t zigbee2mqtt/bridge/request/permit_join -m '{"value":true,"time":254}'
+   ```
+
+3. The device shows up as `DIY C6-DOORBELL` with an `action` expose. Every press
+   publishes `zigbee2mqtt/<name>/action` = `single`, and Home Assistant gets a
+   device trigger:
+
+   ```yaml
+   trigger:
+     - platform: device
+       domain: mqtt
+       device_id: <doorbell>
+       type: action
+       subtype: single
+   ```
+
+## Kconfig knobs (`Doorbell firmware`)
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `DOORBELL_BUTTON_GPIO` | 2 | LP pin of the contact (0…7) |
+| `DOORBELL_ED_TIMEOUT` | 6 (64 min) | how long the parent keeps the child record |
+| `DOORBELL_KEEPALIVE_MS` | 1000 | poll interval while awake |
+| `DOORBELL_JOIN_AWAKE_S` | 120 | stay awake after the first join (interview) |
+| `DOORBELL_KEEPALIVE_WAKE_S` | 0 (off) | periodic re-attach instead of press-only |
+| `DOORBELL_BOOT_AWAKE_S` | 10 | power-on window for flashing / serial |
+| `DOORBELL_GPIO_PROBE` | n | log GPIO0…GPIO10 to find the button pin |
+| `DOORBELL_SELFTEST` | n | count every boot as a press (bench test) |
+
+## Gotchas this project paid for
+
+* `esp_sleep_get_wakeup_causes()` returns `BIT(ESP_SLEEP_WAKEUP_UNDEFINED)`
+  (value `0x1`, not `0`) after a power-on/USB reset. Testing `== 0` never
+  matches, so a "power-on only" branch silently never runs.
+* A pyserial reader **resets** the ESP32-C6 USB-Serial-JTAG bridge when it opens
+  the port (DTR+RTS is the reset sequence). A real button press then looks like
+  a power-on reset and is lost. `serial_capture.py` uses a raw file descriptor
+  for that reason.
+* ZCL reports carry a *change*: the device must report `0` after the press, or
+  the next press reports nothing.
+* A self-built end device has no binding and no ConfigureReporting record, so
+  reports must be sent to an explicit destination (`0x0000`, endpoint 1).
+
+## Repository layout
+
+```
+main/app_main.cpp            boot, wake-cause handling, press delivery, deep sleep
+main/doorbell_device.cpp     Zigbee endpoint, clusters, report path
+main/doorbell_button.cpp     GPIO contact + RTC pull-up
+main/gpio_probe.cpp          bring-up helper: log GPIO levels
+main/Kconfig.projbuild       all configuration
+z2m/esp32c6_doorbell.js      Zigbee2MQTT external converter
+scripts/flash_when_awake.py  flash a device that is asleep most of the time
+scripts/serial_capture.py    serial capture across sleep cycles
+docs/board-and-button.svg    wiring illustration
 ```
 
 ## Power budget
 
 | State | Current |
 | --- | --- |
-| Deep sleep | 7 µA (datasheet typ.) |
-| Wake-up + report (~1 s, radio on) | tens of mA for ~1 s |
+| Deep sleep | ~7 µA (ESP32-C6 datasheet, low-power modes) |
+| Press → report → sleep | tens of mA for ~1.4 s |
 
-With only button presses and no keepalive, a 2000 mAh cell is dominated by the
-idle current (~1.2 mAh/day → years). Each hourly keepalive wake-up would add
-roughly 6 mAh/day, which is why it is off by default.
+Presses only: a 2000 mAh cell is dominated by the idle current (~1.2 mAh/day).
+Each hourly keepalive wake would add roughly 6 mAh/day, which is why it is off.
 
-Note: the board is currently fed from the USB hub, so no inline current
-measurement was possible; the figures are the datasheet values for the parts of
-the chip this firmware switches off.
+The board is currently fed from a USB hub, so no inline current measurement was
+possible; the figures are the datasheet values for the blocks this firmware
+switches off.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
