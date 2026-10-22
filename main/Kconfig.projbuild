@@ -1,0 +1,74 @@
+menu "Doorbell firmware"
+
+    config DOORBELL_BUTTON_GPIO
+        int "GPIO of the doorbell push button"
+        range 0 7 if IDF_TARGET_ESP32C6
+        default 0
+        help
+            GPIO connected to the doorbell contact. Must be an LP/RTC capable
+            pin, because it is the deep-sleep wake-up source (GPIO0..GPIO7 on
+            the ESP32-C6). The contact is wired against GND, the internal
+            pull-up is enabled.
+
+    config DOORBELL_ED_TIMEOUT
+        int "End device timeout (index)"
+        range 0 14
+        default 6
+        help
+            0=10s 1=2min 2=4min 3=8min 4=16min 5=32min 6=64min 7=128min ...
+            Tells the parent how long it keeps the child record before it
+            considers this device gone (ezb_nwk_ed_timeout_e).
+
+    config DOORBELL_KEEPALIVE_MS
+        int "Poll interval while awake (ms)"
+        default 1000
+        help
+            Poll interval used while the device is awake (interview window,
+            button reporting). The device sleeps in deep sleep afterwards, so
+            this only affects the few awake seconds.
+
+    config DOORBELL_JOIN_AWAKE_S
+        int "Stay awake after a fresh join (s)"
+        default 120
+        help
+            After joining a network for the first time the device stays awake
+            for this long, polling fast, so the coordinator can complete the
+            interview. Without it the device would sleep in the middle of the
+            interview.
+
+    config DOORBELL_KEEPALIVE_WAKE_S
+        int "Periodic keepalive wake-up (s, 0 = off)"
+        default 0
+        help
+            Deep sleep loses the parent link after DOORBELL_ED_TIMEOUT. With a
+            periodic wake-up the device re-attaches regularly and stays
+            "online" in the coordinator. Each wake-up costs roughly 6 mAh/1000,
+            so 0 (only wake on button press) is the lowest power setting; the
+            first press after a long idle then needs an extra rejoin.
+
+    config DOORBELL_BOOT_AWAKE_S
+        int "Stay awake after power-on (s)"
+        default 10
+        help
+            Deep sleep powers down the USB PHY, so the board disappears from
+            /dev/ttyACM* while sleeping. After a power-on reset (hub power
+            cycle, EN reset) the firmware therefore stays awake for this long
+            before the first deep sleep, which is the window used to flash or
+            to watch the serial console.
+
+    config DOORBELL_SELFTEST
+        bool "Inject a virtual button press after boot (bench test)"
+        default n
+        help
+            Treats every boot as a button press. Only for bring-up tests.
+
+    config DOORBELL_SELFTEST_REBOOT_S
+        int "Self-test: sleep period between simulated presses (s)"
+        depends on DOORBELL_SELFTEST
+        default 20
+        help
+            In self-test mode every boot counts as one press and the normal
+            deep-sleep path is taken, with this period as the timer wake-up, so
+            a press cycle repeats by itself without touching the hardware.
+
+endmenu
