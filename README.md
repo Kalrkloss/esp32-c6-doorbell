@@ -113,6 +113,27 @@ python3 scripts/serial_capture.py --port /dev/ttyACM2 --seconds 120 --out /tmp/b
 Both scripts assume a hub port that `uhubctl` can switch; with a plain USB cable
 just replug and run `idf.py -p <port> flash` during the 10 s window.
 
+## Prebuilt firmware
+
+The build from this commit is attached to the
+[release](https://github.com/Kalrkloss/esp32c6-doorbell/releases/latest):
+
+| Asset | Purpose |
+| --- | --- |
+| `esp32c6-doorbell-merged.bin` | complete image (bootloader, partition table, app) — flash at `0x0` |
+| `esp32c6-doorbell-app.bin` | application only — flash at `0x20000` |
+| `SHA256SUMS` | checksums |
+
+```bash
+python -m esptool --chip esp32c6 -p /dev/ttyACM0 -b 460800 \
+  --before default_reset --after hard_reset write_flash \
+  --flash_mode dio --flash_freq 80m --flash_size 4MB \
+  0x0 esp32c6-doorbell-merged.bin
+```
+
+The prebuilt image uses the Kconfig defaults, i.e. **button on GPIO2**. A
+different pin needs a rebuild (`idf.py menuconfig` → `Doorbell firmware`).
+
 ## Pairing (Zigbee2MQTT)
 
 1. Install the external converter — either copy `z2m/esp32c6_doorbell.js` to
